@@ -4,45 +4,50 @@ import logging
 import json
 import aiofiles
 import asyncio
-import openai
-
-logging.basicConfig(filename='Openai_Manager.log', level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s') # Configure logging to log to a file
-logger = logging.getLogger(__name__) # Create a logger
-
-console_handler = logging.StreamHandler() # Create a console handler
-console_handler.setLevel(logging.DEBUG)
-
-formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s') # Create a formatter and set it for the console handler
-console_handler.setFormatter(formatter)
-
-logger.addHandler(console_handler) # Add the console handler to the logger
+from pathlib import Path
+import subprocess
 
 class OpenaiManager:
 	def __init__(self):
-		logger.debug("Initialised OpenaiManager instance")
+		self.logger = logging.getLogger(self.__class__.__name__)
+		self.logger.setLevel(logging.DEBUG)
+		
+		# Create handlers if they aren't already set up
+		if not self.logger.hasHandlers():
+			console_handler = logging.StreamHandler()
+			console_handler.setLevel(logging.DEBUG)
+			file_handler = logging.FileHandler('OpenaiManager.log')
+			file_handler.setLevel(logging.DEBUG)
+			formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+			console_handler.setFormatter(formatter)
+			file_handler.setFormatter(formatter)
+			self.logger.addHandler(console_handler)
+			self.logger.addHandler(file_handler)
+
+		self.logger.debug("Initialised OpenaiManager instance")
 
 	async def load_key(self, keypath="openai.priv") -> bool:
 		if not os.path.exists(keypath):
-			logger.error("Key not found")
+			self.logger.error("Key not found")
 			return False
 
 		async with aiofiles.open(keypath, "r") as key_file:
 			api_key = await key_file.read()
 
 		openai.api_key = api_key
-		logger.debug("Key read and assigned to OpenAI object")
+		self.logger.debug("Key read and assigned to OpenAI object")
 		return True
 
 	async def get_system_message(self, smsg_path="system") -> bool:
 		smsg_path = os.path.join("chat_history", smsg_path)
 		if not os.path.exists(smsg_path):
-			logger.error("Could not find system message")
+			self.logger.error("Could not find system message")
 			return False
 
 		async with aiofiles.open(smsg_path, 'r') as f:
 			self.smsg = await f.read()
 
-		logger.debug("System message read")
+		self.logger.debug("System message read")
 		return True
 
 	async def get_history(self, suffix="") -> bool:
@@ -53,18 +58,18 @@ class OpenaiManager:
 					content = await f.read()
 					self.history = json.loads(content)
 				except json.decoder.JSONDecodeError as e:
-					logger.error(f"Json decoder error when reading chat log. Perhaps an empty file?")
+					self.logger.error(f"Json decoder error when reading chat log. Perhaps an empty file?")
 					return False
 				self.history.insert(0,{"role": "system", "content": self.smsg})
 		else:
-			logger.debug(f"No file path found for chat history at {file_path}. Initialised empty history")
+			self.logger.debug(f"No file path found for chat history at {file_path}. Initialised empty history")
 			self.history = []
 
 		return True
 
 	async def chat(self, msg: str, model: str = "gpt-4o", max_completion_tokens: int = -1, presence_penalty: float = -1.0, amnesia: bool = False, history_suffix: str = "") -> str:
 		if msg == "":
-			logger.error("Message must not be empty")
+			self.logger.error("Message must not be empty")
 			return ""
 
 		try:
@@ -84,16 +89,16 @@ class OpenaiManager:
 				**params
 			)
 		except openai.NotFoundError as e:
-			logger.error("openai could not find the model")
+			self.logger.error("openai could not find the model")
 			return ""
 		except openai.AuthenticationError as e:
-			logger.error("openai could not authenticate. Key might be read in wrong?")
+			self.logger.error("openai could not authenticate. Key might be read in wrong?")
 			return ""
 		except Exception as e:
-			logger.critical(f"Unknown error occured: {e}")
+			self.logger.critical(f"Unknown error occured: {e}")
 			return ""
 
-		logger.info(f"Completion recieved with {len(completion.choices[0].message.content)} chars. That's ~{len(completion.choices[0].message.content)/4} tokens")
+		self.logger.info(f"Completion recieved with {len(completion.choices[0].message.content)} chars. That's ~{len(completion.choices[0].message.content)/4} tokens")
 
 		if not amnesia:
 			self.history.append({"role": "user", "content": msg})
@@ -104,9 +109,9 @@ class OpenaiManager:
 				async with aiofiles.open(file_path, 'w') as f:
 					await f.write(json.dumps(self.history, indent=4))
 
-				logger.debug(f"Wrote history to {file_path}")
+				self.logger.debug(f"Wrote history to {file_path}")
 			except Exception as e:
-				logger.error(f"Could not write history to {file_path}. {e}")
+				self.logger.error(f"Could not write history to {file_path}. {e}")
 
 		return completion.choices[0].message.content
 
@@ -114,13 +119,60 @@ class OpenaiManager:
 		file_path = os.path.join(f"chat_history", f"chat_log{suffix}")
 		if os.path.exists(file_path):
 			os.remove(file_path)
-			logger.debug(f"Removed file {file_path}")
+			self.logger.debug(f"Removed file {file_path}")
 			return True
 		else:
-			logger.warning(f"History was asked to clear, but no history was found")
+			self.logger.warning(f"History was asked to clear, but no history was found")
 			return False
 
+	async def speak(self, msg: str, voice: str = "shimmer", model: str = "tts-1") -> bool:
+		if msg == "":
+			self.logger.warning("Cannot speak message since message is blank")
+			return False
 
+		speech_file_path = Path(__file__).parent / "speech.wav"
+		response = await asyncio.to_thread(
+			openai.audio.speech.create,
+			model=model,
+			voice=voice,
+			input=msg,
+			response_format="wav"
+		)
+		response.stream_to_file(speech_file_path)
+
+		ffmpeg_command = [
+			"ffmpeg",
+			"-y", 
+			"-i", speech_file_path,
+			"-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
+			"-v", "quiet",
+			"speech_normalised.wav"
+		]
+
+		try:
+			await asyncio.to_thread(subprocess.run, ffmpeg_command, check=True)
+			self.logger.debug("Normalised the audio file")
+			speech_path = "speech_normalised.wav"
+		except subprocess.CalledProcessError as e:
+			self.logger.error(f"Could not normalise audio file. ffmpeg returned error code. {e}")
+			speech_path = speech_file_path
+
+		return True
+
+	async def transcribe(self, file_path: str) -> str:
+		if not os.path.exists(file_path):
+			self.logger.error("Path does not exist for file to transcribe")
+			return ""
+		
+		audio_file = open(file_path, "rb")
+		transcription = await asyncio.to_thread(
+			openai.audio.transcriptions.create,
+			model="whisper-1", 
+			file=audio_file
+			# response_format="vtt"
+		)
+
+		return transcription.text
 
 async def main():
 	manager = OpenaiManager()
@@ -134,11 +186,16 @@ async def main():
 	if not await manager.get_history():
 		return
 
-	response = await manager.chat("Do you like talking about weather?")
+	response = await manager.chat("Red, blue, green, snog, marry, avoid")
 
 	print(response)
 
+	# await manager.speak(response)
+
 	# manager.clear_history()
+
+	# resp = await manager.transcribe("speech.wav")
+	# print(resp)
 
 if __name__ == '__main__':
 	asyncio.run(main())
