@@ -67,7 +67,7 @@ class OpenaiManager:
 
 		return True
 
-	async def chat(self, msg: str, model: str = "gpt-4o", max_completion_tokens: int = -1, presence_penalty: float = -1.0, amnesia: bool = False, history_suffix: str = "", smgs: str = "") -> str:
+	async def chat(self, msg: str, model: str = "gpt-4o", max_completion_tokens: int = -1, presence_penalty: float = -1.0, amnesia: bool = False, history_suffix: str = "", smsg: str = "") -> str:
 		if msg == "":
 			self.logger.error("Message must not be empty")
 			return ""
@@ -187,10 +187,10 @@ async def main():
 
 	import elevenlabs_manager
 	from playsound import playsound
-	eleven = elevenlabs_manager.ElevenlabsManager()
+	# eleven = elevenlabs_manager.ElevenlabsManager()
 
-	if not await eleven.load_key():
-		return
+	# if not await eleven.load_key():
+	# 	return
 	
 	if not await manager.load_key():
 		return	
@@ -205,8 +205,8 @@ async def main():
 
 	print(response)
 
-	audio_path = await eleven.speak(response)
-	playsound(audio_path)
+	# audio_path = await eleven.speak(response)
+	# playsound(audio_path)
 
 	
 
