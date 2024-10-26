@@ -6,6 +6,7 @@ import aiofiles
 import asyncio
 from pathlib import Path
 import subprocess
+import httpcore
 
 class OpenaiManager:
 	def __init__(self):
@@ -78,11 +79,16 @@ class OpenaiManager:
 			system = smsg
 			self.logger.debug("Using system message override (passed into .chat() method)")
 
+		if not amnesia:
+			history = self.history
+		else:
+			history = []
+
 		try:
 			# Prepare the parameters with conditionally added arguments
 			params = {
 				"model": model,
-				"messages": [{"role": "system", "content": system}] + self.history + [{"role": "user", "content": msg}]
+				"messages": [{"role": "system", "content": system}] + history + [{"role": "user", "content": msg}]
 			}
 			if max_completion_tokens != -1:
 				params["max_completion_tokens"] = max_completion_tokens
@@ -100,6 +106,8 @@ class OpenaiManager:
 		except openai.AuthenticationError as e:
 			self.logger.error("openai could not authenticate. Key might be read in wrong?")
 			return ""
+		except httpcore.LocalProtocolError as e:
+			self.logger.critical("Potential key error")
 		except Exception as e:
 			self.logger.critical(f"Unknown error occured: {e}")
 			# raise e
@@ -204,7 +212,9 @@ async def main():
 	if not await manager.get_history():
 		return
 
-	response = await manager.chat("Can you write me a haiku about yourself")
+	# response = await manager.chat("What did I just ask about?", amnesia=True)
+	system_message = "You are Bill"
+	response = await manager.chat("Where is jupiter", smsg=system_message, model="gpt-4o-mini", amnesia=True)
 
 	print(response)
 
