@@ -67,16 +67,22 @@ class OpenaiManager:
 
 		return True
 
-	async def chat(self, msg: str, model: str = "gpt-4o", max_completion_tokens: int = -1, presence_penalty: float = -1.0, amnesia: bool = False, history_suffix: str = "") -> str:
+	async def chat(self, msg: str, model: str = "gpt-4o", max_completion_tokens: int = -1, presence_penalty: float = -1.0, amnesia: bool = False, history_suffix: str = "", smgs: str = "") -> str:
 		if msg == "":
 			self.logger.error("Message must not be empty")
 			return ""
+
+		if smsg == "":
+			system = self.smsg
+		else:
+			system = smsg
+			logger.debug("Using system message override (passed into .chat() method)")
 
 		try:
 			# Prepare the parameters with conditionally added arguments
 			params = {
 				"model": model,
-				"messages": [{"role": "system", "content": self.smsg}] + self.history + [{"role": "user", "content": msg}]
+				"messages": [{"role": "system", "content": system}] + self.history + [{"role": "user", "content": msg}]
 			}
 			if max_completion_tokens != -1:
 				params["max_completion_tokens"] = max_completion_tokens
@@ -96,7 +102,9 @@ class OpenaiManager:
 			return ""
 		except Exception as e:
 			self.logger.critical(f"Unknown error occured: {e}")
+			# raise e
 			return ""
+
 
 		self.logger.info(f"Completion recieved with {len(completion.choices[0].message.content)} chars. That's ~{len(completion.choices[0].message.content)/4} tokens")
 
@@ -176,6 +184,13 @@ class OpenaiManager:
 
 async def main():
 	manager = OpenaiManager()
+
+	import elevenlabs_manager
+	from playsound import playsound
+	eleven = elevenlabs_manager.ElevenlabsManager()
+
+	if not await eleven.load_key():
+		return
 	
 	if not await manager.load_key():
 		return	
@@ -186,16 +201,14 @@ async def main():
 	if not await manager.get_history():
 		return
 
-	response = await manager.chat("Red, blue, green, snog, marry, avoid")
+	response = await manager.chat("Can you write me a haiku about yourself")
 
 	print(response)
 
-	# await manager.speak(response)
+	audio_path = await eleven.speak(response)
+	playsound(audio_path)
 
-	# manager.clear_history()
-
-	# resp = await manager.transcribe("speech.wav")
-	# print(resp)
+	
 
 if __name__ == '__main__':
 	asyncio.run(main())
