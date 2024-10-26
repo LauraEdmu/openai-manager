@@ -76,7 +76,7 @@ class OpenaiManager:
 			system = self.smsg
 		else:
 			system = smsg
-			logger.debug("Using system message override (passed into .chat() method)")
+			self.logger.debug("Using system message override (passed into .chat() method)")
 
 		try:
 			# Prepare the parameters with conditionally added arguments
@@ -133,12 +133,15 @@ class OpenaiManager:
 			self.logger.warning(f"History was asked to clear, but no history was found")
 			return False
 
-	async def speak(self, msg: str, voice: str = "shimmer", model: str = "tts-1") -> bool:
+	async def speak(self, msg: str, voice: str = "shimmer", model: str = "tts-1", save_path: str = "") -> str:
 		if msg == "":
 			self.logger.warning("Cannot speak message since message is blank")
 			return False
 
-		speech_file_path = Path(__file__).parent / "speech.wav"
+		if save_path == "":
+			save_path = "speech.wav"
+
+		speech_file_path = Path(__file__).parent / save_path
 		response = await asyncio.to_thread(
 			openai.audio.speech.create,
 			model=model,
@@ -154,18 +157,18 @@ class OpenaiManager:
 			"-i", speech_file_path,
 			"-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
 			"-v", "quiet",
-			"speech_normalised.wav"
+			f"{save_path}_normalised.wav"
 		]
 
 		try:
 			await asyncio.to_thread(subprocess.run, ffmpeg_command, check=True)
 			self.logger.debug("Normalised the audio file")
-			speech_path = "speech_normalised.wav"
+			speech_path = f"{save_path}_normalised.wav"
 		except subprocess.CalledProcessError as e:
 			self.logger.error(f"Could not normalise audio file. ffmpeg returned error code. {e}")
 			speech_path = speech_file_path
 
-		return True
+		return speech_path
 
 	async def transcribe(self, file_path: str) -> str:
 		if not os.path.exists(file_path):
