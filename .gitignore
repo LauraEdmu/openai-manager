@@ -5,3 +5,5 @@ chat_history/
 *.priv
 __pycache__/
 eleven*
+transcriptions/
+ps1/*.txt

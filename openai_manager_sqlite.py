@@ -7,17 +7,22 @@ import asyncio
 from pathlib import Path
 import subprocess
 import httpcore
+import aiosqlite  # Added import
 
 class OpenaiManager:
 	def __init__(self):
 		self.logger = logging.getLogger(self.__class__.__name__)
 		self.logger.setLevel(logging.DEBUG)
+
+		logdir = "logs"
+		os.makedirs(logdir, exist_ok=True)
+		logfile = os.path.join(logdir, "OpenaiManager.log")
 		
 		# Create handlers if they aren't already set up
 		if not self.logger.hasHandlers():
 			console_handler = logging.StreamHandler()
 			console_handler.setLevel(logging.DEBUG)
-			file_handler = logging.FileHandler('OpenaiManager.log')
+			file_handler = logging.FileHandler(logfile)
 			file_handler.setLevel(logging.DEBUG)
 			formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 			console_handler.setFormatter(formatter)
@@ -26,6 +31,19 @@ class OpenaiManager:
 			self.logger.addHandler(file_handler)
 
 		self.logger.debug("Initialised OpenaiManager instance")
+
+	async def init_db(self):
+		# self.db_path = "chat_history.db"
+		self.db_path = os.path.join("chat_history", "chat_history.db")
+		async with aiosqlite.connect(self.db_path) as db:
+			await db.execute('''
+				CREATE TABLE IF NOT EXISTS history (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					role TEXT NOT NULL,
+					content TEXT NOT NULL
+				)
+			''')
+			await db.commit()
 
 	async def load_key(self, keypath="openai.priv") -> bool:
 		if not os.path.exists(keypath):
@@ -51,20 +69,13 @@ class OpenaiManager:
 		self.logger.debug("System message read")
 		return True
 
-	async def get_history(self, suffix="") -> bool:
-		file_path = os.path.join(f"chat_history", f"chat_log{suffix}")
-		if os.path.exists(file_path):
-			async with aiofiles.open(file_path, 'r') as f:
-				try:
-					content = await f.read()
-					self.history = json.loads(content)
-				except json.decoder.JSONDecodeError as e:
-					self.logger.error(f"Json decoder error when reading chat log. Perhaps an empty file?")
-					return False
-		else:
-			self.logger.debug(f"No file path found for chat history at {file_path}. Initialised empty history")
-			self.history = []
-
+	async def get_history(self) -> bool:
+		self.history = []
+		async with aiosqlite.connect(self.db_path) as db:
+			async with db.execute('SELECT role, content FROM history') as cursor:
+				async for row in cursor:
+					self.history.append({"role": row[0], "content": row[1]})
+		self.logger.debug("History loaded from database")
 		return True
 
 	async def chat(self, msg: str, model: str = "gpt-4o", max_completion_tokens: int = -1, presence_penalty: float = -1.0, amnesia: bool = False, history_suffix: str = "", smsg: str = "") -> str:
@@ -119,26 +130,20 @@ class OpenaiManager:
 			self.history.append({"role": "user", "content": msg})
 			self.history.append({"role": "assistant", "content": completion.choices[0].message.content})
 
-			try:
-				file_path = os.path.join(f"chat_history", f"chat_log{history_suffix}")
-				async with aiofiles.open(file_path, 'w') as f:
-					await f.write(json.dumps(self.history, indent=4))
-
-				self.logger.debug(f"Wrote history to {file_path}")
-			except Exception as e:
-				self.logger.error(f"Could not write history to {file_path}. {e}")
+			async with aiosqlite.connect(self.db_path) as db:
+				await db.execute('INSERT INTO history (role, content) VALUES (?, ?)', ("user", msg))
+				await db.execute('INSERT INTO history (role, content) VALUES (?, ?)', ("assistant", completion.choices[0].message.content))
+				await db.commit()
+				self.logger.debug("History updated in database")
 
 		return completion.choices[0].message.content
 
-	def clear_history(self, suffix="") -> bool:
-		file_path = os.path.join(f"chat_history", f"chat_log{suffix}")
-		if os.path.exists(file_path):
-			os.remove(file_path)
-			self.logger.debug(f"Removed file {file_path}")
+	async def clear_history(self) -> bool:
+		async with aiosqlite.connect(self.db_path) as db:
+			await db.execute('DELETE FROM history')
+			await db.commit()
+			self.logger.debug("Cleared history in database")
 			return True
-		else:
-			self.logger.warning(f"History was asked to clear, but no history was found")
-			return False
 
 	async def speak(self, msg: str, voice: str = "shimmer", model: str = "tts-1", save_path: str = "") -> str:
 		if msg == "":
@@ -177,7 +182,7 @@ class OpenaiManager:
 
 		return speech_path
 
-	async def transcribe(self, file_path: str) -> str:
+	async def transcribe(self, file_path: str, srt=False) -> str:
 		if not os.path.exists(file_path):
 			self.logger.error("Path does not exist for file to transcribe")
 			return ""
@@ -186,41 +191,47 @@ class OpenaiManager:
 		transcription = await asyncio.to_thread(
 			openai.audio.transcriptions.create,
 			model="whisper-1", 
-			file=audio_file
-			# response_format="vtt"
+			file=audio_file,
+			response_format="text" if not srt else "srt"
 		)
 
-		return transcription.text
+		return transcription.text if not srt else transcription
+
+async def quick_trans(manager):
+	filename = str(input("Enter the filename: "))
+	is_srt = str(input("Is the file an SRT file? (y/N): ")).lower()
+
+	if is_srt not in ["y", "n"]:
+		print("Invalid input")
+		return
+	
+	if is_srt == "y":
+		is_srt = True
+	else:
+		is_srt = False
+
+	if not os.path.exists(filename):
+		print("File does not exist")
+		return
+	
+	text = await manager.transcribe(filename, srt=is_srt)
+
+	filename = filename.split(".")[0] + ".srt" if is_srt else filename.split(".")[0] + ".txt"
+
+	out_path = os.path.join("transcriptions", filename)
+	os.makedirs("transcriptions", exist_ok=True)
+
+	async with aiofiles.open(out_path, "w") as f:
+		await f.write(text)
 
 async def main():
 	manager = OpenaiManager()
-
-	import elevenlabs_manager
-	from playsound import playsound
-	# eleven = elevenlabs_manager.ElevenlabsManager()
-
-	# if not await eleven.load_key():
-	# 	return
 	
 	if not await manager.load_key():
 		return	
 
-	if not await manager.get_system_message():
-		return
+	await quick_trans(manager)
 
-	if not await manager.get_history():
-		return
-
-	# response = await manager.chat("What did I just ask about?", amnesia=True)
-	system_message = "You are Bill"
-	response = await manager.chat("Where is jupiter", smsg=system_message, model="gpt-4o-mini", amnesia=True)
-
-	print(response)
-
-	# audio_path = await eleven.speak(response)
-	# playsound(audio_path)
-
-	
 
 if __name__ == '__main__':
 	asyncio.run(main())
