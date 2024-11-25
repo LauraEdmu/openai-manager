@@ -1,16 +1,18 @@
 import os
 import openai
 import logging
-import json
 import aiofiles
 import asyncio
 from pathlib import Path
 import subprocess
 import httpcore
-import aiosqlite  # Added import
+import aiosqlite
+from colorama import Fore, Style, init
 
 class OpenaiManager:
 	def __init__(self):
+		self.db_path = os.path.join("chat_history", "chat_history.db")
+		
 		self.logger = logging.getLogger(self.__class__.__name__)
 		self.logger.setLevel(logging.DEBUG)
 
@@ -34,7 +36,6 @@ class OpenaiManager:
 
 	async def init_db(self):
 		# self.db_path = "chat_history.db"
-		self.db_path = os.path.join("chat_history", "chat_history.db")
 		async with aiosqlite.connect(self.db_path) as db:
 			await db.execute('''
 				CREATE TABLE IF NOT EXISTS history (
@@ -45,7 +46,7 @@ class OpenaiManager:
 			''')
 			await db.commit()
 
-	async def load_key(self, keypath="openai.priv") -> bool:
+	async def load_key(self, keypath: str = "openai.priv") -> bool:
 		if not os.path.exists(keypath):
 			self.logger.error("Key not found")
 			return False
@@ -57,7 +58,7 @@ class OpenaiManager:
 		self.logger.debug("Key read and assigned to OpenAI object")
 		return True
 
-	async def get_system_message(self, smsg_path="system") -> bool:
+	async def get_system_message(self, smsg_path: str ="system") -> bool:
 		smsg_path = os.path.join("chat_history", smsg_path)
 		if not os.path.exists(smsg_path):
 			self.logger.error("Could not find system message")
@@ -118,11 +119,20 @@ class OpenaiManager:
 			return ""
 		except httpcore.LocalProtocolError as e:
 			self.logger.critical("Potential key error")
+			return ""
 		except Exception as e:
 			self.logger.critical(f"Unknown error occured: {e}")
 			# raise e
 			return ""
 
+		if completion.choices[0].message.content == None:
+			self.logger.warning("Completion returned None")
+			return ""			
+
+		if completion.choices[0].message.content == "":
+			self.logger.warning("Completion returned empty message")
+			return ""
+	
 
 		self.logger.info(f"Completion recieved with {len(completion.choices[0].message.content)} chars. That's ~{len(completion.choices[0].message.content)/4} tokens")
 
@@ -148,7 +158,7 @@ class OpenaiManager:
 	async def speak(self, msg: str, voice: str = "shimmer", model: str = "tts-1", save_path: str = "") -> str:
 		if msg == "":
 			self.logger.warning("Cannot speak message since message is blank")
-			return False
+			return ""
 
 		if save_path == "":
 			save_path = "speech.wav"
@@ -157,7 +167,7 @@ class OpenaiManager:
 		response = await asyncio.to_thread(
 			openai.audio.speech.create,
 			model=model,
-			voice=voice,
+			voice=voice, # type: ignore
 			input=msg,
 			response_format="wav"
 		)
@@ -180,9 +190,9 @@ class OpenaiManager:
 			self.logger.error(f"Could not normalise audio file. ffmpeg returned error code. {e}")
 			speech_path = speech_file_path
 
-		return speech_path
+		return str(speech_path)
 
-	async def transcribe(self, file_path: str, srt=False) -> str:
+	async def transcribe(self, file_path: str, srt: bool = False) -> str:
 		if not os.path.exists(file_path):
 			self.logger.error("Path does not exist for file to transcribe")
 			return ""
@@ -195,14 +205,30 @@ class OpenaiManager:
 			response_format="text" if not srt else "srt"
 		)
 
-		return transcription.text if not srt else transcription
+		# return transcription.text if not srt else transcription
+		return transcription
+	
+	async def translate(self, file_path: str, srt: bool = False) -> str:
+		if not os.path.exists(file_path):
+			self.logger.error("Path does not exist for file to transcribe")
+			return ""
+		
+		audio_file = open(file_path, "rb")
+		translation = await asyncio.to_thread(
+			openai.audio.translations.create,
+			model="whisper-1", 
+			file=audio_file,
+			response_format="text" if not srt else "srt"
+		)
 
-async def quick_trans(manager):
+		return translation.text if not srt else translation # type: ignore
+
+async def quick_trans(manager, translate: bool = False):
 	filename = str(input("Enter the filename: "))
 	is_srt = str(input("Is the file an SRT file? (y/N): ")).lower()
 
-	if is_srt not in ["y", "n"]:
-		print("Invalid input")
+	if is_srt not in ["y", "n", ""]:
+		print(f"{Fore.RED}{Style.BRIGHT}Invalid input{Style.RESET_ALL}")
 		return
 	
 	if is_srt == "y":
@@ -211,10 +237,18 @@ async def quick_trans(manager):
 		is_srt = False
 
 	if not os.path.exists(filename):
-		print("File does not exist")
+		print(f"{Fore.RED}{Style.BRIGHT}File does not exist{Style.RESET_ALL}")
 		return
 	
-	text = await manager.transcribe(filename, srt=is_srt)
+	if os.path.splitext(filename)[1] not in [".mp3", ".mp4", ".mpeg", ".mpga", ".m4a",  ".wav", ".webm"]:
+		print(f"{Fore.RED}{Style.BRIGHT}File is not a valid audio file{Style.RESET_ALL}")
+		return
+	
+	if os.path.getsize(filename)/1024/1024 > 25:
+		print(f"{Fore.RED}{Style.BRIGHT}File is too large (>25MB){Style.RESET_ALL}")
+		return
+	
+	text = await manager.transcribe(filename, srt=is_srt) if not translate else await manager.translate(filename, srt=is_srt)
 
 	filename = filename.split(".")[0] + ".srt" if is_srt else filename.split(".")[0] + ".txt"
 
@@ -223,14 +257,83 @@ async def quick_trans(manager):
 
 	async with aiofiles.open(out_path, "w") as f:
 		await f.write(text)
+	
+	print(f"{Fore.GREEN}{Style.BRIGHT}Transcription saved to {out_path}{Style.RESET_ALL}")
+
+async def quick_speak(manager):
+	text = str(input("Enter the text to speak: "))
+	voice = str(input("Enter the voice to use (shimmer, dave, etc.): "))
+	filename = str(input("Enter the filename (default: speech.wav): "))
+	
+	if filename == "":
+		filename = "speech.wav"
+
+	speech_path = await manager.speak(text, voice=voice, save_path=filename)
+
+	print(f"{Fore.GREEN}{Style.BRIGHT}Speech saved to {speech_path}{Style.RESET_ALL}")
+
+async def quick_chat(manager):
+	msg = str(input("Enter the message to chat: "))
+	model = str(input("Enter the model to use (default: gpt-4o): "))
+	max_completion_tokens = int(input("Enter the max completion tokens (default: -1): "))
+	presence_penalty = float(input("Enter the presence penalty (default: -1.0): "))
+	amnesia = str(input("Forget history? (y/N): ")).lower()
+	history_suffix = str(input("Enter the history suffix (default: \"\"): "))
+	smsg = str(input("Enter the system message (default: \"\"): "))
+
+	if amnesia == "y":
+		amnesia = True
+	else:
+		amnesia = False
+
+	if history_suffix == "":
+		history_suffix = None
+
+	if smsg == "":
+		smsg = None
+
+	response = await manager.chat(msg, model=model, max_completion_tokens=max_completion_tokens, presence_penalty=presence_penalty, amnesia=amnesia, history_suffix=history_suffix, smsg=smsg)
+
+	print(f"{Fore.GREEN}{Style.BRIGHT}Response: {response}{Style.RESET_ALL}")
+
+async def chat_loop(manager):
+	print(f"{Fore.CYAN}{Style.BRIGHT}Enter message to chat (q to quit){Style.RESET_ALL}")
+	
+	while True:
+		msg = str(input("Msg: "))
+		if msg == "q":
+			break
+
+		response = await manager.chat(msg, model="gpt-4o", smsg="Please be helpful and answer the question.")
+
+		print(f"Response: {response}")
+	
+	print(f"{Fore.CYAN}{Style.BRIGHT}Exiting chat loop{Style.RESET_ALL}")
 
 async def main():
+	init() # Initialise colorama for Windows
+
+	print(f"{Fore.CYAN}{Style.BRIGHT}Entering Main for OpenaiManager{Style.RESET_ALL}")
+	
 	manager = OpenaiManager()
+	manager.logger.setLevel(logging.WARNING)
 	
 	if not await manager.load_key():
 		return	
 
-	await quick_trans(manager)
+	# await quick_trans(manager, translate=False)
+
+	await manager.get_history()
+	await manager.get_system_message()
+
+	input_msg = "Can you give me the lyrics to doja cat's say so"
+
+	response = await manager.chat(input_msg, model="gpt-4o", smsg="Please be helpful and answer the question.")
+
+	print(f"Response: {response}")
+
+
+	input("Press Enter to exit...")
 
 
 if __name__ == '__main__':
